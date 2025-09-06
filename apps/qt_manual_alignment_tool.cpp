@@ -38,6 +38,10 @@
 #include <vtkAxesActor.h>
 #include <vtkOrientationMarkerWidget.h>
 #include <vtkInteractorStyleTrackballCamera.h>
+#include <vtkArrowSource.h>
+#include <vtkTransformPolyDataFilter.h>
+#include <vtkVectorText.h>
+#include <vtkFollower.h>
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
@@ -54,6 +58,8 @@
 #include <map>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
+#include <iostream>
 #include <vector>
 #include <array>
 #include <cmath>
@@ -66,8 +72,8 @@ private:
     // Cloud selection state
     int originCloudIndex = -1;
     int movingCloudIndex = -1;
-    bool uniqueColorMode = true;
-    bool showOriginalColors = false;
+    bool uniqueColorMode = false;      // Changed default to false
+    bool showOriginalColors = true;    // Changed default to true
 
     struct CloudData {
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud;
@@ -96,11 +102,27 @@ private:
 public:
     PointCloudViewer(QWidget *parent = nullptr) : QMainWindow(parent) {
         setWindowTitle("Pointcloud Aligner");
-        
+        setupUI();
+        connectSignals();
+    }
+
+private:
+    void setupUI() {
         // Create the main widget and layout
         QWidget* centralWidget = new QWidget(this);
         QHBoxLayout* mainLayout = new QHBoxLayout(centralWidget);
         
+        setupVTKWidget();
+        setupRightPanel();
+        
+        mainLayout->addWidget(qvtkWidget, 4);  // Viewer gets 4/5 of the width
+        mainLayout->addWidget(scrollArea, 1);   // Right panel gets 1/5 of the width
+        
+        setCentralWidget(centralWidget);
+        resize(1200, 800);
+    }
+    
+    void setupVTKWidget() {
         // Create VTK widget
         qvtkWidget = new QVTKOpenGLNativeWidget();
         
@@ -126,49 +148,164 @@ public:
         orientationWidget->SetViewport(0.0, 0.0, 0.2, 0.2);
         orientationWidget->SetEnabled(1);
         orientationWidget->InteractiveOff();
-        
-        // Set black background
-        renderer->SetBackground(0.0, 0.0, 0.0);
-        
+    }
+    
+    void setupRightPanel() {
         // Create right panel with scroll area for controls
-        QScrollArea* scrollArea = new QScrollArea();
+        scrollArea = new QScrollArea();
         QWidget* rightPanel = new QWidget();
         QVBoxLayout* rightLayout = new QVBoxLayout(rightPanel);
         
-        // Cloud Loading Section
+        // Create all sections
+        QGroupBox* loadGroup = createLoadSection();
+        QGroupBox* selectionGroup = createSelectionSection();
+        QGroupBox* transformGroup = createTransformSection();
+        QGroupBox* displayGroup = createDisplaySection();
+        
+        // Add all sections to right panel
+        rightLayout->addWidget(loadGroup);
+        rightLayout->addWidget(selectionGroup);
+        rightLayout->addWidget(transformGroup);
+        rightLayout->addWidget(displayGroup);
+        rightLayout->addStretch();
+        
+        scrollArea->setWidget(rightPanel);
+        scrollArea->setWidgetResizable(true);
+        scrollArea->setMinimumWidth(400);
+    }
+    
+    QGroupBox* createLoadSection() {
         QGroupBox* loadGroup = new QGroupBox("Point Clouds");
+        loadGroup->setStyleSheet(
+            "QGroupBox { "
+            "    background-color: #f8f9fa; "
+            "    border: 1px solid #dde1e3; "
+            "    border-radius: 6px; "
+            "    margin-top: 1ex; "
+            "    font-weight: bold; "
+            "} "
+            "QGroupBox::title { "
+            "    color: #2d3436; "
+            "}"
+        );
         QVBoxLayout* loadLayout = new QVBoxLayout(loadGroup);
         
         QPushButton* loadButton = new QPushButton("Load Point Cloud", loadGroup);
+        loadButton->setStyleSheet(
+            "QPushButton { "
+            "    background-color: #00b894; "
+            "    color: white; "
+            "    border: none; "
+            "    padding: 8px; "
+            "    border-radius: 4px; "
+            "    font-weight: bold; "
+            "} "
+            "QPushButton:hover { background-color: #00cec9; }"
+            "QPushButton:pressed { background-color: #00a8a3; }"
+        );
         connect(loadButton, &QPushButton::clicked, this, &PointCloudViewer::loadPointCloud);
         
         cloudList = new QListWidget(loadGroup);
+        cloudList->setStyleSheet(
+            "QListWidget { "
+            "    background-color: white; "
+            "    border: 1px solid #dfe6e9; "
+            "    border-radius: 4px; "
+            "    padding: 4px; "
+            "} "
+            "QListWidget::item { "
+            "    background-color: #f5f6fa; "
+            "    border: 1px solid #dfe6e9; "
+            "    border-radius: 4px; "
+            "    margin: 2px; "
+            "} "
+            "QListWidget::item:hover { "
+            "    background-color: #dfe6e9; "
+            "}"
+        );
+        cloudList->setSpacing(2);
+        
         loadLayout->addWidget(loadButton);
         loadLayout->addWidget(cloudList);
         
-        // Origin Cloud Selection
-        QGroupBox* originGroup = new QGroupBox("Origin Cloud Selection");
+        return loadGroup;
+    }
+    
+    QGroupBox* createSelectionSection() {
+        QGroupBox* selectionGroup = new QGroupBox("Cloud Selection");
+        selectionGroup->setStyleSheet("QGroupBox { font-weight: bold; }");
+        QVBoxLayout* selectionLayout = new QVBoxLayout(selectionGroup);
+        
+        // Origin Cloud Selection with enhanced visuals
+        QGroupBox* originGroup = new QGroupBox("Reference/Fixed Cloud");
+        originGroup->setStyleSheet(
+            "QGroupBox { "
+            "    background-color: #f0f8ff; "
+            "    border: 2px solid #4a90e2; "
+            "    border-radius: 6px; "
+            "    margin-top: 1ex; "
+            "} "
+            "QGroupBox::title { "
+            "    color: #4a90e2; "
+            "    subcontrol-origin: margin; "
+            "    left: 10px; "
+            "    padding: 0 5px; "
+            "}"
+        );
         QVBoxLayout* originLayout = new QVBoxLayout(originGroup);
         
-        QLabel* originInstruction = new QLabel("Select the reference/origin cloud:");
-        originInstruction->setStyleSheet("QLabel { font-style: italic; color: #666666; }");
+        QLabel* originInstruction = new QLabel("Select the fixed reference cloud that other clouds will align to:");
+        originInstruction->setStyleSheet("QLabel { font-style: italic; color: #4a90e2; margin-bottom: 5px; }");
+        originInstruction->setWordWrap(true);
         originLayout->addWidget(originInstruction);
         
         originCloudList = new QListWidget(originGroup);
+        originCloudList->setStyleSheet(
+            "QListWidget { border: 1px solid #4a90e2; border-radius: 4px; }"
+            "QListWidget::item:selected { background-color: #4a90e2; color: white; }"
+            "QListWidget::item:hover { background-color: #e6f3ff; }"
+        );
         originLayout->addWidget(originCloudList);
         
-        // Moving Cloud Selection
-        QGroupBox* movingGroup = new QGroupBox("Moving Cloud Selection");
+        // Moving Cloud Selection with enhanced visuals
+        QGroupBox* movingGroup = new QGroupBox("Moving Cloud");
+        movingGroup->setStyleSheet(
+            "QGroupBox { "
+            "    background-color: #fff5f5; "
+            "    border: 2px solid #e74c3c; "
+            "    border-radius: 6px; "
+            "    margin-top: 1ex; "
+            "} "
+            "QGroupBox::title { "
+            "    color: #e74c3c; "
+            "    subcontrol-origin: margin; "
+            "    left: 10px; "
+            "    padding: 0 5px; "
+            "}"
+        );
         QVBoxLayout* movingLayout = new QVBoxLayout(movingGroup);
         
-        QLabel* movingInstruction = new QLabel("Select the cloud to transform:");
-        movingInstruction->setStyleSheet("QLabel { font-style: italic; color: #666666; }");
+        QLabel* movingInstruction = new QLabel("Select the cloud you want to transform and align:");
+        movingInstruction->setStyleSheet("QLabel { font-style: italic; color: #e74c3c; margin-bottom: 5px; }");
+        movingInstruction->setWordWrap(true);
         movingLayout->addWidget(movingInstruction);
         
         movingCloudList = new QListWidget(movingGroup);
+        movingCloudList->setStyleSheet(
+            "QListWidget { border: 1px solid #e74c3c; border-radius: 4px; }"
+            "QListWidget::item:selected { background-color: #e74c3c; color: white; }"
+            "QListWidget::item:hover { background-color: #ffe6e6; }"
+        );
         movingLayout->addWidget(movingCloudList);
         
-        // Transform Control Section
+        // Add both selection groups to the selection layout
+        selectionLayout->addWidget(originGroup);
+        selectionLayout->addWidget(movingGroup);
+        
+        return selectionGroup;
+    }
+    
+    QGroupBox* createTransformSection() {
         QGroupBox* transformGroup = new QGroupBox("Transform Controls");
         QVBoxLayout* transformLayout = new QVBoxLayout(transformGroup);
         
@@ -182,21 +319,80 @@ public:
         stepLayout->addWidget(stepLabel);
         stepLayout->addWidget(stepSizeSpinBox);
         
+        // ColorICP button with styling
+        QPushButton* colorICPButton = new QPushButton("Refine with ColorICP");
+        colorICPButton->setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; padding: 6px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #45a049; }"
+        );
+        connect(colorICPButton, &QPushButton::clicked, this, &PointCloudViewer::refineWithColorICP);
+
+        // Visualize TFs button
+        QPushButton* visualizeTFsButton = new QPushButton("Visualize Transforms");
+        visualizeTFsButton->setStyleSheet(
+            "QPushButton { background-color: #e67e22; color: white; padding: 6px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #d35400; }"
+        );
+        connect(visualizeTFsButton, &QPushButton::clicked, this, &PointCloudViewer::visualizeTransforms);
+
+        // Export transforms button
+        QPushButton* exportTFsButton = new QPushButton("Export Transforms");
+        exportTFsButton->setStyleSheet(
+            "QPushButton { background-color: #8e44ad; color: white; padding: 6px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #9b59b6; }"
+        );
+        connect(exportTFsButton, &QPushButton::clicked, this, &PointCloudViewer::exportTransforms);
+
+        // Reference frame toggle
+        QCheckBox* showReferenceFrame = new QCheckBox("Show Reference Frame");
+        showReferenceFrame->setChecked(true);
+        showReferenceFrame->setStyleSheet("QCheckBox { font-weight: bold; color: #666666; }");
+        connect(showReferenceFrame, &QCheckBox::toggled, [this](bool checked) {
+            orientationWidget->SetEnabled(checked);
+            renderWindow->Render();
+        });
+        
         // Transform buttons grid
+        QGridLayout* transformButtonLayout = createTransformButtons();
+        
+        // Transform Display
+        transformOutput = new QTextEdit();
+        transformOutput->setReadOnly(true);
+        transformOutput->setMinimumHeight(100);
+        
+        transformLayout->addLayout(stepLayout);
+        transformLayout->addWidget(colorICPButton);
+        transformLayout->addWidget(visualizeTFsButton);
+        transformLayout->addWidget(exportTFsButton);
+        transformLayout->addWidget(showReferenceFrame);
+        transformLayout->addLayout(transformButtonLayout);
+        transformLayout->addWidget(transformOutput);
+        
+        return transformGroup;
+    }
+    
+    QGridLayout* createTransformButtons() {
         QGridLayout* transformButtonLayout = new QGridLayout();
         
-        // ColorICP button
-        QPushButton* colorICPButton = new QPushButton("Refine with ColorICP");
-        transformLayout->addWidget(colorICPButton);
-        connect(colorICPButton, &QPushButton::clicked, this, &PointCloudViewer::refineWithColorICP);
-        
-        // Translation buttons
+        // Translation buttons with colors
         tx_minus_btn = new QPushButton("-X");
         tx_plus_btn = new QPushButton("+X");
         ty_minus_btn = new QPushButton("-Y");
         ty_plus_btn = new QPushButton("+Y");
         tz_minus_btn = new QPushButton("-Z");
         tz_plus_btn = new QPushButton("+Z");
+        
+        // Set colors for translation buttons
+        QString xAxisStyle = "QPushButton { background-color: #ff4444; color: white; padding: 6px; border-radius: 4px; } QPushButton:hover { background-color: #cc3333; }";
+        QString yAxisStyle = "QPushButton { background-color: #44ff44; color: white; padding: 6px; border-radius: 4px; } QPushButton:hover { background-color: #33cc33; }";
+        QString zAxisStyle = "QPushButton { background-color: #4444ff; color: white; padding: 6px; border-radius: 4px; } QPushButton:hover { background-color: #3333cc; }";
+        
+        tx_minus_btn->setStyleSheet(xAxisStyle);
+        tx_plus_btn->setStyleSheet(xAxisStyle);
+        ty_minus_btn->setStyleSheet(yAxisStyle);
+        ty_plus_btn->setStyleSheet(yAxisStyle);
+        tz_minus_btn->setStyleSheet(zAxisStyle);
+        tz_plus_btn->setStyleSheet(zAxisStyle);
         
         transformButtonLayout->addWidget(tx_minus_btn, 0, 0);
         transformButtonLayout->addWidget(tx_plus_btn, 0, 1);
@@ -205,13 +401,22 @@ public:
         transformButtonLayout->addWidget(tz_minus_btn, 2, 0);
         transformButtonLayout->addWidget(tz_plus_btn, 2, 1);
         
-        // Rotation buttons
+        // Rotation buttons with colors
         rx_minus_btn = new QPushButton("-RX");
         rx_plus_btn = new QPushButton("+RX");
         ry_minus_btn = new QPushButton("-RY");
         ry_plus_btn = new QPushButton("+RY");
         rz_minus_btn = new QPushButton("-RZ");
         rz_plus_btn = new QPushButton("+RZ");
+        
+        // Set colors for rotation buttons
+        QString rotationStyle = "QPushButton { background-color: #ff9933; color: white; padding: 6px; border-radius: 4px; } QPushButton:hover { background-color: #cc7a29; }";
+        rx_minus_btn->setStyleSheet(rotationStyle);
+        rx_plus_btn->setStyleSheet(rotationStyle);
+        ry_minus_btn->setStyleSheet(rotationStyle);
+        ry_plus_btn->setStyleSheet(rotationStyle);
+        rz_minus_btn->setStyleSheet(rotationStyle);
+        rz_plus_btn->setStyleSheet(rotationStyle);
         
         transformButtonLayout->addWidget(rx_minus_btn, 0, 2);
         transformButtonLayout->addWidget(rx_plus_btn, 0, 3);
@@ -220,52 +425,57 @@ public:
         transformButtonLayout->addWidget(rz_minus_btn, 2, 2);
         transformButtonLayout->addWidget(rz_plus_btn, 2, 3);
         
-        transformLayout->addLayout(stepLayout);
-        transformLayout->addLayout(transformButtonLayout);
-        
-        // Display Options Group
+        return transformButtonLayout;
+    }
+    
+    QGroupBox* createDisplaySection() {
         QGroupBox* displayGroup = new QGroupBox("Display Options");
         QVBoxLayout* displayLayout = new QVBoxLayout(displayGroup);
         
-        QCheckBox* uniqueColorCheckbox = new QCheckBox("Unique Color per Cloud");
-        uniqueColorCheckbox->setChecked(true);
-        uniqueColorCheckbox->setStyleSheet("QCheckBox { font-weight: bold; color: darkblue; }");
+        // Create a group box for color mode selection
+        QGroupBox* colorModeGroup = new QGroupBox("Point Cloud Colors");
+        colorModeGroup->setStyleSheet(
+            "QGroupBox { "
+            "    background-color: #f8f9fa; "
+            "    border: 1px solid #dee2e6; "
+            "    border-radius: 4px; "
+            "    margin-top: 1ex; "
+            "} "
+            "QGroupBox::title { "
+            "    color: #495057; "
+            "    subcontrol-origin: margin; "
+            "    left: 7px; "
+            "    padding: 0 3px; "
+            "}"
+        );
+        QVBoxLayout* colorModeLayout = new QVBoxLayout(colorModeGroup);
         
-        QCheckBox* originalColorCheckbox = new QCheckBox("Show Original Point Colors");
-        originalColorCheckbox->setChecked(false);
-        originalColorCheckbox->setStyleSheet("QCheckBox { font-weight: bold; color: darkgreen; }");
+        uniqueColorRadio = new QRadioButton("Unique Color per Cloud");
+        uniqueColorRadio->setStyleSheet(
+            "QRadioButton { color: #2c3e50; padding: 2px; }"
+            "QRadioButton:hover { background-color: #e9ecef; border-radius: 3px; }"
+        );
         
-        displayLayout->addWidget(uniqueColorCheckbox);
-        displayLayout->addWidget(originalColorCheckbox);
+        originalColorRadio = new QRadioButton("Original Point Colors");
+        originalColorRadio->setChecked(true);  // Make original colors default
+        originalColorRadio->setStyleSheet(
+            "QRadioButton { color: #2c3e50; padding: 2px; }"
+            "QRadioButton:hover { background-color: #e9ecef; border-radius: 3px; }"
+        );
         
-        // Transform Display
-        transformOutput = new QTextEdit();
-        transformOutput->setReadOnly(true);
-        transformOutput->setMinimumHeight(100);
-        transformLayout->addWidget(transformOutput);
+        colorModeLayout->addWidget(originalColorRadio);  // Put original first
+        colorModeLayout->addWidget(uniqueColorRadio);
+        displayLayout->addWidget(colorModeGroup);
         
-        // Add all sections to right panel
-        rightLayout->addWidget(loadGroup);
-        rightLayout->addWidget(originGroup);     // Add origin cloud selection group
-        rightLayout->addWidget(movingGroup);     // Add moving cloud selection group
-        rightLayout->addWidget(transformGroup);
-        rightLayout->addWidget(displayGroup);    // Add display options group
-        rightLayout->addStretch();
-        
-        scrollArea->setWidget(rightPanel);
-        scrollArea->setWidgetResizable(true);
-        scrollArea->setMinimumWidth(400);
-        
-        mainLayout->addWidget(qvtkWidget, 4);  // Viewer gets 4/5 of the width
-        mainLayout->addWidget(scrollArea, 1);   // Right panel gets 1/5 of the width
-        
-        setCentralWidget(centralWidget);
-        resize(1200, 800);
-        
+        return displayGroup;
+    }
+    
+    void connectSignals() {
         // Connect transform control signals
         connect(stepSizeSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 [this](double value) { stepSize = static_cast<float>(value); });
         
+        // Translation button connections
         connect(tx_minus_btn, &QPushButton::clicked, [this]() { adjustTransform(TransformMode::TRANSLATE_X, -stepSize); });
         connect(tx_plus_btn, &QPushButton::clicked, [this]() { adjustTransform(TransformMode::TRANSLATE_X, stepSize); });
         connect(ty_minus_btn, &QPushButton::clicked, [this]() { adjustTransform(TransformMode::TRANSLATE_Y, -stepSize); });
@@ -273,6 +483,7 @@ public:
         connect(tz_minus_btn, &QPushButton::clicked, [this]() { adjustTransform(TransformMode::TRANSLATE_Z, -stepSize); });
         connect(tz_plus_btn, &QPushButton::clicked, [this]() { adjustTransform(TransformMode::TRANSLATE_Z, stepSize); });
         
+        // Rotation button connections
         connect(rx_minus_btn, &QPushButton::clicked, [this]() { adjustTransform(TransformMode::ROTATE_X, -stepSize); });
         connect(rx_plus_btn, &QPushButton::clicked, [this]() { adjustTransform(TransformMode::ROTATE_X, stepSize); });
         connect(ry_minus_btn, &QPushButton::clicked, [this]() { adjustTransform(TransformMode::ROTATE_Y, -stepSize); });
@@ -280,17 +491,23 @@ public:
         connect(rz_minus_btn, &QPushButton::clicked, [this]() { adjustTransform(TransformMode::ROTATE_Z, -stepSize); });
         connect(rz_plus_btn, &QPushButton::clicked, [this]() { adjustTransform(TransformMode::ROTATE_Z, stepSize); });
         
-        // Connect display option signals
-        connect(uniqueColorCheckbox, &QCheckBox::toggled, [this](bool checked) {
-            uniqueColorMode = checked;
-            updateCloudColors();
-            qvtkWidget->renderWindow()->Render();
+        // Connect display option signals for color mode
+        connect(uniqueColorRadio, &QRadioButton::toggled, [this](bool checked) {
+            if (checked) {
+                uniqueColorMode = true;
+                showOriginalColors = false;
+                updateCloudColors();
+                qvtkWidget->renderWindow()->Render();
+            }
         });
         
-        connect(originalColorCheckbox, &QCheckBox::toggled, [this](bool checked) {
-            showOriginalColors = checked;
-            updateCloudColors();
-            qvtkWidget->renderWindow()->Render();
+        connect(originalColorRadio, &QRadioButton::toggled, [this](bool checked) {
+            if (checked) {
+                uniqueColorMode = false;
+                showOriginalColors = true;
+                updateCloudColors();
+                qvtkWidget->renderWindow()->Render();
+            }
         });
 
         // Connect cloud selection signals
@@ -298,6 +515,12 @@ public:
             originCloudIndex = row;
             updateCloudVisuals();
             updateTransformDisplay();
+            
+            // Update transform arrows when reference cloud changes
+            if (showTransforms) {
+                createTransformArrows();
+                renderWindow->Render();
+            }
         });
         
         connect(movingCloudList, &QListWidget::currentRowChanged, [this](int row) {
@@ -308,6 +531,78 @@ public:
     }
 
 private slots:
+    void visualizeTransforms() {
+        // Toggle transform visualization
+        showTransforms = !showTransforms;
+        
+        if (showTransforms) {
+            createTransformArrows();
+        } else {
+            clearTransformArrows();
+        }
+        
+        renderWindow->Render();
+    }
+
+    void exportTransforms() {
+        if (originCloudIndex < 0 || clouds.empty()) {
+            QMessageBox::warning(this, "Warning", "Please select a reference cloud first.");
+            return;
+        }
+
+        // Generate transform report
+        QString report = generateTransformReport();
+        
+        // Output to terminal
+        std::cout << "\n=== TRANSFORM EXPORT ===" << std::endl;
+        std::cout << report.toStdString() << std::endl;
+        std::cout << "========================\n" << std::endl;
+        
+        // Show in popup dialog for copy/paste
+        QDialog* dialog = new QDialog(this);
+        dialog->setWindowTitle("Transform Export");
+        dialog->setMinimumSize(600, 400);
+        
+        QVBoxLayout* layout = new QVBoxLayout(dialog);
+        
+        QLabel* titleLabel = new QLabel("Transformation Matrices and 6DOF Values");
+        titleLabel->setStyleSheet("font-weight: bold; font-size: 14px; color: #2c3e50; margin-bottom: 10px;");
+        layout->addWidget(titleLabel);
+        
+        QTextEdit* textEdit = new QTextEdit(dialog);
+        textEdit->setPlainText(report);
+        textEdit->setFont(QFont("Courier", 10)); // Monospace font for better alignment
+        textEdit->selectAll(); // Select all text for easy copying
+        layout->addWidget(textEdit);
+        
+        QHBoxLayout* buttonLayout = new QHBoxLayout();
+        
+        QPushButton* copyButton = new QPushButton("Copy All", dialog);
+        copyButton->setStyleSheet(
+            "QPushButton { background-color: #3498db; color: white; padding: 8px 16px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #2980b9; }"
+        );
+        connect(copyButton, &QPushButton::clicked, [textEdit]() {
+            textEdit->selectAll();
+            textEdit->copy();
+        });
+        
+        QPushButton* closeButton = new QPushButton("Close", dialog);
+        closeButton->setStyleSheet(
+            "QPushButton { background-color: #95a5a6; color: white; padding: 8px 16px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #7f8c8d; }"
+        );
+        connect(closeButton, &QPushButton::clicked, dialog, &QDialog::accept);
+        
+        buttonLayout->addWidget(copyButton);
+        buttonLayout->addStretch();
+        buttonLayout->addWidget(closeButton);
+        layout->addLayout(buttonLayout);
+        
+        dialog->exec();
+        dialog->deleteLater();
+    }
+
     void refineWithColorICP() {
         if (movingCloudIndex < 0 || originCloudIndex < 0) {
             QMessageBox::warning(this, "Warning", "Please select both origin and moving clouds first.");
@@ -470,6 +765,12 @@ private slots:
         
         transform->SetMatrix(matrix);
         cloudData.actor->SetUserTransform(transform);
+        
+        // Update transform arrows if they are visible
+        if (showTransforms) {
+            createTransformArrows();
+        }
+        
         renderWindow->Render();
     }
     
@@ -613,23 +914,174 @@ private slots:
         // Add to renderer
         renderer->AddActor(cloudData.actor);
         
-        // Add to list with selection buttons
-        QListWidgetItem* item = new QListWidgetItem(cloudList);
-        QCheckBox* checkbox = new QCheckBox(cloudName);
-        checkbox->setChecked(true);
+        // Create widget for cloud control
+        QWidget* cloudControlWidget = new QWidget;
+        QHBoxLayout* controlLayout = new QHBoxLayout(cloudControlWidget);
+        controlLayout->setContentsMargins(2, 2, 2, 2);
+        controlLayout->setSpacing(4);
+
+        // Visibility toggle button
+        QPushButton* visibilityButton = new QPushButton;
+        visibilityButton->setFixedSize(24, 24);
+        visibilityButton->setToolTip("Toggle cloud visibility");
+        visibilityButton->setCursor(Qt::PointingHandCursor);
+        visibilityButton->setText("👁");
+        visibilityButton->setStyleSheet(
+            "QPushButton { "
+            "    background-color: #4a90e2; "
+            "    border: none; "
+            "    border-radius: 12px; "
+            "    color: white; "
+            "    font-size: 14px; "
+            "} "
+            "QPushButton:hover { background-color: #357abd; }"
+            "QPushButton:pressed { background-color: #2d6da3; }"
+        );
+
+        // Cloud name label with color indicator
+        QLabel* nameLabel = new QLabel(cloudName);
+        nameLabel->setStyleSheet(QString("QLabel { color: #2c3e50; padding: 2px; }"));
         
-        connect(checkbox, &QCheckBox::stateChanged, 
-                [this, cloudName](int state) {
+        // Remove button
+        QPushButton* removeButton = new QPushButton;
+        removeButton->setFixedSize(20, 20);
+        removeButton->setToolTip("Remove cloud");
+        removeButton->setCursor(Qt::PointingHandCursor);
+        removeButton->setStyleSheet(
+            "QPushButton { "
+            "    background-color: #ff4757; "
+            "    border: none; "
+            "    border-radius: 10px; "
+            "    color: white; "
+            "    font-weight: bold; "
+            "} "
+            "QPushButton:hover { background-color: #ff6b81; }"
+            "QPushButton:pressed { background-color: #ee5253; }"
+        );
+        removeButton->setText("×");
+
+        controlLayout->addWidget(visibilityButton);
+        controlLayout->addWidget(nameLabel, 1);
+        controlLayout->addWidget(removeButton);
+
+        QListWidgetItem* item = new QListWidgetItem(cloudList);
+        cloudList->setItemWidget(item, cloudControlWidget);
+        item->setSizeHint(cloudControlWidget->sizeHint());
+        
+        // Connect visibility toggle
+        connect(visibilityButton, &QPushButton::clicked, [this, visibilityButton, cloudName]() {
             auto it = std::find_if(clouds.begin(), clouds.end(),
                 [&](const CloudData& cd) { return cd.cloud_name == cloudName.toStdString(); });
             if (it != clouds.end()) {
-                it->actor->SetVisibility(state == Qt::Checked);
+                bool isVisible = it->actor->GetVisibility();
+                it->actor->SetVisibility(!isVisible);
+                visibilityButton->setStyleSheet(
+                    QString("QPushButton { "
+                    "    background-color: %1; "
+                    "    border: none; "
+                    "    border-radius: 12px; "
+                    "    color: white; "
+                    "    font-size: 14px; "
+                    "} "
+                    "QPushButton:hover { background-color: %2; }"
+                    "QPushButton:pressed { background-color: %3; }")
+                    .arg(!isVisible ? "#4a90e2" : "#95a5a6")
+                    .arg(!isVisible ? "#357abd" : "#7f8c8d")
+                    .arg(!isVisible ? "#2d6da3" : "#666e6f")
+                );
                 renderWindow->Render();
             }
         });
-        
-        cloudList->setItemWidget(item, checkbox);
-        item->setSizeHint(checkbox->sizeHint());
+
+        // Connect remove button
+        connect(removeButton, &QPushButton::clicked, [this, cloudName]() {
+            // Find the cloud index
+            auto it = std::find_if(clouds.begin(), clouds.end(),
+                [&](const CloudData& cd) { return cd.cloud_name == cloudName.toStdString(); });
+            
+            if (it != clouds.end()) {
+                int cloudIndex = std::distance(clouds.begin(), it);
+                
+                // Update selection indices before removal
+                if (cloudIndex == originCloudIndex) {
+                    originCloudIndex = -1;  // Clear origin selection
+                }
+                if (cloudIndex == movingCloudIndex) {
+                    movingCloudIndex = -1;  // Clear moving selection
+                }
+                
+                // Adjust indices for clouds after the removed one
+                if (originCloudIndex > cloudIndex) {
+                    originCloudIndex--;
+                }
+                if (movingCloudIndex > cloudIndex) {
+                    movingCloudIndex--;
+                }
+
+                // Remove from renderer first
+                renderer->RemoveActor(it->actor);
+                
+                // First, remove from cloud list widget
+                for(int i = cloudList->count() - 1; i >= 0; --i) {
+                    QWidget* widget = cloudList->itemWidget(cloudList->item(i));
+                    if (widget) {
+                        QLabel* label = widget->findChild<QLabel*>();
+                        if (label && label->text() == cloudName) {
+                            delete cloudList->takeItem(i);
+                            break;
+                        }
+                    }
+                }
+
+                // Then, safely remove from origin list widget
+                int originCurrentRow = originCloudList->currentRow();
+                for(int i = originCloudList->count() - 1; i >= 0; --i) {
+                    QListWidgetItem* item = originCloudList->item(i);
+                    if (item && item->text() == cloudName) {
+                        delete originCloudList->takeItem(i);
+                        if (i == originCurrentRow) {
+                            if (originCloudList->count() > 0) {
+                                originCloudList->setCurrentRow(std::min(i, originCloudList->count() - 1));
+                            }
+                        }
+                        break;
+                    }
+                }
+                
+                // Finally, safely remove from moving list widget
+                int movingCurrentRow = movingCloudList->currentRow();
+                for(int i = movingCloudList->count() - 1; i >= 0; --i) {
+                    QListWidgetItem* item = movingCloudList->item(i);
+                    if (item && item->text() == cloudName) {
+                        delete movingCloudList->takeItem(i);
+                        if (i == movingCurrentRow) {
+                            if (movingCloudList->count() > 0) {
+                                movingCloudList->setCurrentRow(std::min(i, movingCloudList->count() - 1));
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                // Remove from clouds vector last
+                clouds.erase(it);
+                
+                // Clear transform display if no clouds are selected
+                if (originCloudIndex == -1 || movingCloudIndex == -1) {
+                    transformOutput->clear();
+                }
+                
+                // Update visualization
+                updateCloudVisuals();
+                
+                // Update transform arrows if they are visible
+                if (showTransforms) {
+                    createTransformArrows();
+                }
+                
+                renderWindow->Render();
+            }
+        });
         
         // Add to origin and moving cloud lists
         originCloudList->addItem(cloudName);
@@ -649,6 +1101,214 @@ private slots:
         renderWindow->Render();
         
         updateTransformDisplay();
+    }
+
+    void createTransformArrows() {
+        clearTransformArrows();
+        
+        if (originCloudIndex < 0 || clouds.empty()) return;
+        
+        // Get origin cloud position as reference
+        cv::Mat originTransform = clouds[originCloudIndex].transform_matrix;
+        cv::Point3f originPos(originTransform.at<float>(0,3), 
+                             originTransform.at<float>(1,3), 
+                             originTransform.at<float>(2,3));
+        
+        for (size_t i = 0; i < clouds.size(); ++i) {
+            if (i == originCloudIndex) continue; // Skip origin cloud
+            
+            auto& cloudData = clouds[i];
+            cv::Mat transform = cloudData.transform_matrix;
+            
+            // Extract target cloud position
+            cv::Point3f targetPos(transform.at<float>(0,3), 
+                                 transform.at<float>(1,3), 
+                                 transform.at<float>(2,3));
+            
+            // Calculate vector from origin to target
+            cv::Point3f direction = targetPos - originPos;
+            float distance = cv::norm(direction);
+            
+            if (distance < 1e-6) continue; // Skip if clouds are at same position
+            
+            // Normalize direction vector
+            direction = direction * (1.0f / distance);
+            
+            // Create arrow source with proportional dimensions
+            vtkSmartPointer<vtkArrowSource> arrowSource = vtkSmartPointer<vtkArrowSource>::New();
+            arrowSource->SetTipLength(0.15);  // Tip is 15% of arrow length
+            arrowSource->SetTipRadius(0.08);  // Increased tip radius for thicker appearance
+            arrowSource->SetShaftRadius(0.05); // Increased shaft radius for thicker appearance
+            
+            // Create transform for arrow
+            vtkSmartPointer<vtkTransform> arrowTransform = vtkSmartPointer<vtkTransform>::New();
+            
+            // Position arrow at origin cloud position
+            arrowTransform->Translate(originPos.x, originPos.y, originPos.z);
+            
+            // Orient arrow to point toward target cloud
+            // Calculate rotation to align arrow with direction vector
+            cv::Point3f defaultDirection(1.0f, 0.0f, 0.0f); // Arrow default points along X-axis
+            cv::Point3f rotationAxis = defaultDirection.cross(direction);
+            float rotationAngle = acos(std::max(-1.0f, std::min(1.0f, defaultDirection.dot(direction))));
+            
+            if (cv::norm(rotationAxis) > 1e-6) {
+                // Normalize rotation axis
+                rotationAxis = rotationAxis * (1.0f / cv::norm(rotationAxis));
+                
+                // Convert to degrees and apply rotation
+                arrowTransform->RotateWXYZ(rotationAngle * 180.0 / M_PI, 
+                                          rotationAxis.x, rotationAxis.y, rotationAxis.z);
+            }
+            
+            // Scale arrow to match the actual distance (dynamic length, no limits)
+            arrowTransform->Scale(distance, 0.05, 0.05); // Length = distance, increased fixed width/height for thicker arrows
+            
+            // Apply transform to arrow
+            vtkSmartPointer<vtkTransformPolyDataFilter> transformFilter = 
+                vtkSmartPointer<vtkTransformPolyDataFilter>::New();
+            transformFilter->SetInputConnection(arrowSource->GetOutputPort());
+            transformFilter->SetTransform(arrowTransform);
+            
+            // Create mapper
+            vtkSmartPointer<vtkPolyDataMapper> arrowMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+            arrowMapper->SetInputConnection(transformFilter->GetOutputPort());
+            
+            // Create actor
+            vtkSmartPointer<vtkActor> arrowActor = vtkSmartPointer<vtkActor>::New();
+            arrowActor->SetMapper(arrowMapper);
+            
+            // Set arrows to gray color for consistency
+            arrowActor->GetProperty()->SetColor(0.6, 0.6, 0.6); // Gray color
+            arrowActor->GetProperty()->SetOpacity(0.9);
+            arrowActor->GetProperty()->SetLineWidth(4.0); // Increased line width
+            
+            // Add arrow to renderer
+            renderer->AddActor(arrowActor);
+            transformArrows.push_back(arrowActor);
+            
+            // Create distance label at midpoint of arrow with better visibility
+            cv::Point3f labelPos = originPos + direction * (distance * 0.6f); // Position at 60% along arrow
+            
+            std::ostringstream labelText;
+            labelText << cloudData.cloud_name << "\n" << std::fixed << std::setprecision(2) << distance << "m";
+            
+            vtkSmartPointer<vtkVectorText> textSource = vtkSmartPointer<vtkVectorText>::New();
+            textSource->SetText(labelText.str().c_str());
+            
+            vtkSmartPointer<vtkPolyDataMapper> textMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+            textMapper->SetInputConnection(textSource->GetOutputPort());
+            
+            vtkSmartPointer<vtkFollower> textActor = vtkSmartPointer<vtkFollower>::New();
+            textActor->SetMapper(textMapper);
+            textActor->SetPosition(labelPos.x, labelPos.y, labelPos.z + 0.05); // Fixed offset
+            
+            // Fixed text scale for consistent visibility
+            textActor->SetScale(0.05, 0.05, 0.05);
+            
+            // High contrast text with outline effect
+            textActor->GetProperty()->SetColor(1.0, 1.0, 1.0); // White text
+            textActor->GetProperty()->SetAmbient(1.0);
+            textActor->GetProperty()->SetDiffuse(0.0);
+            textActor->GetProperty()->SetSpecular(0.0);
+            textActor->SetCamera(renderer->GetActiveCamera());
+            
+            // Add label to renderer
+            renderer->AddActor(textActor);
+            transformLabels.push_back(textActor);
+        }
+    }
+
+    void clearTransformArrows() {
+        // Remove all transform arrows and labels from renderer
+        for (auto& arrow : transformArrows) {
+            renderer->RemoveActor(arrow);
+        }
+        for (auto& label : transformLabels) {
+            renderer->RemoveActor(label);
+        }
+        
+        transformArrows.clear();
+        transformLabels.clear();
+    }
+
+    QString generateTransformReport() {
+        QString report;
+        QTextStream stream(&report);
+        stream.setRealNumberPrecision(6);
+        
+        const auto& originCloud = clouds[originCloudIndex];
+        stream << "Reference Cloud: " << QString::fromStdString(originCloud.cloud_name) << "\n";
+        stream << "Total Clouds: " << clouds.size() << "\n\n";
+        
+        // Get origin cloud transform as reference
+        cv::Mat originTransform = originCloud.transform_matrix;
+        cv::Mat originInverse;
+        cv::invert(originTransform, originInverse);
+        
+        for (size_t i = 0; i < clouds.size(); ++i) {
+            const auto& cloudData = clouds[i];
+            
+            stream << "Cloud: " << QString::fromStdString(cloudData.cloud_name);
+            if (i == originCloudIndex) {
+                stream << " (REFERENCE)\n";
+                stream << "Extrinsic Matrix (Identity):\n";
+                stream << "1.000000  0.000000  0.000000  0.000000\n";
+                stream << "0.000000  1.000000  0.000000  0.000000\n";
+                stream << "0.000000  0.000000  1.000000  0.000000\n";
+                stream << "0.000000  0.000000  0.000000  1.000000\n";
+                stream << "6DOF: TX=0.000000, TY=0.000000, TZ=0.000000, RX=0.000000, RY=0.000000, RZ=0.000000\n\n";
+                continue;
+            }
+            
+            stream << "\n";
+            
+            // Calculate relative transform from current cloud to origin cloud
+            cv::Mat relativeTransform = originInverse * cloudData.transform_matrix;
+            
+            // Extract translation
+            float tx = relativeTransform.at<float>(0, 3);
+            float ty = relativeTransform.at<float>(1, 3);
+            float tz = relativeTransform.at<float>(2, 3);
+            
+            // Extract rotation matrix and convert to Euler angles (XYZ order)
+            cv::Mat rotMat = relativeTransform(cv::Rect(0, 0, 3, 3));
+            float rx, ry, rz;
+            
+            // Extract Euler angles from rotation matrix (ZYX convention)
+            ry = asin(-rotMat.at<float>(2, 0));
+            if (cos(ry) > 1e-6) {
+                rx = atan2(rotMat.at<float>(2, 1), rotMat.at<float>(2, 2));
+                rz = atan2(rotMat.at<float>(1, 0), rotMat.at<float>(0, 0));
+            } else {
+                rx = atan2(-rotMat.at<float>(1, 2), rotMat.at<float>(1, 1));
+                rz = 0;
+            }
+            
+            // Output extrinsic matrix
+            stream << "Extrinsic Matrix:\n";
+            for (int row = 0; row < 4; row++) {
+                for (int col = 0; col < 4; col++) {
+                    stream << QString("%1  ").arg(relativeTransform.at<float>(row, col), 8, 'f', 6);
+                }
+                stream << "\n";
+            }
+            
+            // Output 6DOF values
+            stream << QString("6DOF: TX=%1, TY=%2, TZ=%3, RX=%4, RY=%5, RZ=%6\n")
+                     .arg(tx, 8, 'f', 6)
+                     .arg(ty, 8, 'f', 6)
+                     .arg(tz, 8, 'f', 6)
+                     .arg(rx, 8, 'f', 6)
+                     .arg(ry, 8, 'f', 6)
+                     .arg(rz, 8, 'f', 6);
+            
+            // Calculate distance from origin
+            float distance = sqrt(tx*tx + ty*ty + tz*tz);
+            stream << QString("Distance from reference: %1 meters\n\n").arg(distance, 0, 'f', 3);
+        }
+        
+        return report;
     }
 
 private:
@@ -723,6 +1383,9 @@ private:
     vtkSmartPointer<vtkRenderer> renderer;
     vtkSmartPointer<vtkRenderWindow> renderWindow;
     vtkSmartPointer<vtkOrientationMarkerWidget> orientationWidget;
+    
+    // UI widgets
+    QScrollArea* scrollArea;
     QListWidget* cloudList;
     QListWidget* originCloudList;    // List for origin cloud selection
     QListWidget* movingCloudList;    // List for moving cloud selection
@@ -730,6 +1393,10 @@ private:
     // Control panel widgets
     QDoubleSpinBox* stepSizeSpinBox;
     QTextEdit* transformOutput;
+    
+    // Radio buttons for color mode
+    QRadioButton* uniqueColorRadio;
+    QRadioButton* originalColorRadio;
     
     // Transform control buttons
     QPushButton *tx_minus_btn, *tx_plus_btn;
@@ -742,6 +1409,11 @@ private:
     // Cloud data and state
     std::vector<CloudData> clouds;
     float stepSize = 0.01f;
+    
+    // Transform visualization
+    std::vector<vtkSmartPointer<vtkActor>> transformArrows;
+    std::vector<vtkSmartPointer<vtkFollower>> transformLabels;
+    bool showTransforms = false;
 };
 
 int main(int argc, char** argv) {
